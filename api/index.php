@@ -1,7 +1,7 @@
 <?php
-// Sinhala Subtitle Search & Download API - Improved Download Endpoint
+// Sinhala Subtitle Search & Download API
 // Author: TheCHARITH (Charith Pramodya Senananayake)
-// Enhanced /download to better handle baiscope.lk time-based redirects and external hosts
+// Improved version with precise scraping for cineru.lk and cleaner titles
 
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
@@ -15,81 +15,60 @@ $apiInfo = [
         '/search?query=deadpool&site=baiscope',
         '/download?url=https://www.baiscope.lk/...',
     ],
-    'sites' => ['baiscope', 'cineru', 'piratelk', 'zoom'],
-    'note' => 'For baiscope.lk: Returns the intermediate redirect link if direct extraction fails (common due to timers). Open in browser to complete download.'
+    'sites' => ['baiscope', 'cineru', 'piratelk', 'zoom']
 ];
 
 // ================= SITES =================
 $sites = [
     'baiscope' => 'https://www.baiscope.lk',
-    'cineru' => 'https://cineru.lk',
+    'cineru'   => 'https://cineru.lk',
     'piratelk' => 'https://piratelk.com',
-    'zoom' => 'https://zoom.lk',
+    'zoom'     => 'https://zoom.lk',
 ];
 
 // ================= FETCH =================
-function fetchPage($url, $referer = null) {
+function fetchPage($url) {
     $ch = curl_init($url);
     curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_TIMEOUT => 30,
-        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
-        CURLOPT_HEADER => true,  // Include headers for location check
-        CURLOPT_NOBODY => false,
-    ]);
-    if ($referer) {
-        curl_setopt($ch, CURLOPT_REFERER, $referer);
-    }
-    $response = curl_exec($ch);
-    $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-    $headers = substr($response, 0, $header_size);
-    $body = substr($response, $header_size);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $effectiveUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+@@ -29,99 +39,140 @@ function fetchPage($url) {
     curl_close($ch);
-
-    // Extract Location header if redirect
-    preg_match('/Location:\s*(.+)/i', $headers, $matches);
-    $location = $matches[1] ?? null;
-
-    return [
-        'body' => $body ?: null,
-        'httpCode' => $httpCode,
-        'effectiveUrl' => $effectiveUrl,
-        'location' => trim($location),
-        'headers' => $headers
-    ];
+    return $html ?: null;
 }
 
-// ================= SEARCH (unchanged) =================
+// ================= SEARCH =================
 function searchSite($siteUrl, $query) {
     $searchUrl = rtrim($siteUrl, '/') . '/?s=' . urlencode($query);
-    $result = fetchPage($searchUrl);
-    $html = $result['body'];
+    $html = fetchPage($searchUrl);
     if (!$html) return [];
 
     $dom = new DOMDocument();
     @$dom->loadHTML($html);
     $xpath = new DOMXPath($dom);
+
     $results = [];
     $queryLower = strtolower($query);
-    $querySlug = str_replace(' ', '-', $queryLower);
+    $querySlug  = str_replace(' ', '-', $queryLower);
 
+    // ── Site-specific XPath selectors ─────────────────────────────────────
     if (str_contains($siteUrl, 'cineru.lk')) {
+        // Exact match for cineru.lk structure (as per your HTML sample)
         $nodes = $xpath->query('//article[contains(@class, "item-list")]//h2[contains(@class, "post-box-title")]/a');
     } elseif (str_contains($siteUrl, 'baiscope.lk')) {
+        // Baiscope often uses similar structure or direct href with sinhala
         $nodes = $xpath->query('//h2[contains(@class, "post-box-title")]/a | //a[contains(@href, "sinhala-sub") or contains(@href, "sinhala-subtitle")]');
     } else {
+        // Fallback for piratelk, zoom etc.
         $nodes = $xpath->query('//a[@href]');
     }
 
+    // ── Common exclude patterns ───────────────────────────────────────────
     $excludePatterns = [
         '/category\//i','/tag\//i','/\?/i','/account/i','/home/i',
         '/trending/i','/imdb/i','/settings/i','/logout/i','/login/i',
         '/signup/i','/password/i','/faq/i','/guidance/i','/about/i',
         '/contact/i','/privacy/i','/terms/i','/#comment/i','/page\//i'
     ];
+
     $excludeTitles = [
         'homepage','create','login','logout','register','account',
         'settings','trending','top imdb','my list','watched',
@@ -98,17 +77,24 @@ function searchSite($siteUrl, $query) {
 
     foreach ($nodes as $node) {
         $title = trim($node->textContent);
-        $url = trim($node->getAttribute('href'));
+        $url   = trim($node->getAttribute('href'));
+
         if (!$title || !$url) continue;
 
+        // Make absolute URL
         if (strpos($url, 'http') !== 0) {
             $url = rtrim($siteUrl, '/') . '/' . ltrim($url, '/');
         }
+
         $titleLower = strtolower($title);
-        $urlLower = strtolower($url);
+        $urlLower   = strtolower($url);
 
-        if (!preg_match('/sinhala|sub|subtitle|උපසිරැසි/i', $urlLower)) continue;
+        // Must be a subtitle post (strong filter)
+        if (!preg_match('/sinhala|sub|subtitle|උපසිරැසි/i', $urlLower)) {
+            continue;
+        }
 
+        // Strict matching for PirateLK (as in original)
         if (str_contains($siteUrl, 'piratelk.com')) {
             if (!str_contains($titleLower, $queryLower) &&
                 !str_contains($urlLower, $queryLower) &&
@@ -117,6 +103,7 @@ function searchSite($siteUrl, $query) {
             }
         }
 
+        // Exclude junk links
         foreach ($excludePatterns as $pattern) {
             if (preg_match($pattern, $url)) continue 2;
         }
@@ -124,137 +111,123 @@ function searchSite($siteUrl, $query) {
             if (str_contains($titleLower, $word)) continue 2;
         }
 
+        // Clean up title
         $title = preg_replace('/\(?\s*sinhala\s*(sub|subtitle?s?)\s*\)?/i', '', $title);
         $title = preg_replace('/\[\s*සිංහල\s*උපසිරැසි.*?\]/u', '', $title);
-        $title = preg_replace('/\s*[\|।]\s*“.*?”\s*[\|।]?\s*$/u', '', $title);
-        $title = preg_replace('/\s*[\|।]\s*.*$/u', '', $title);
+        $title = preg_replace('/\s*[\|।]\s*“.*?”\s*[\|।]?\s*$/u', '', $title); // remove quoted Sinhala tagline
+        $title = preg_replace('/\s*[\|।]\s*.*$/u', '', $title); // fallback remove anything after |
         $title = trim($title);
+
         if (strlen($title) < 8) continue;
+
         if (in_array($url, array_column($results, 'url'))) continue;
 
         $results[] = [
             'title' => $title,
-            'url' => $url
+            'url'   => $url
         ];
     }
+
     return $results;
 }
 
 // ================= DOWNLOAD =================
 function getDownloadLink($pageUrl) {
-    $pageResult = fetchPage($pageUrl);
-    if (!$pageResult['body']) return null;
-
+    $html = fetchPage($pageUrl);
+    if (!$html) return null;
+    
     $dom = new DOMDocument();
-    @$dom->loadHTML($pageResult['body']);
+    @$dom->loadHTML($html);
     $xpath = new DOMXPath($dom);
-
-    // Priority 1: Common text in download button (seen in many posts)
-    $nodes = $xpath->query('//a[contains(translate(., "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "sinhala subtitles download") or contains(., "සිංහල උපසිරැසි මෙතනින් බාගන්න") or contains(., "බාගන්න")]');
-
-    // Priority 2: Common classes or IDs
+    
+    $nodes = $xpath->query('//a[contains(., "සිංහල උපසිරැසි මෙතනින් බාගන්න") and contains(., "SInhala Subtitles")]');
+    
     if ($nodes->length === 0) {
-        $nodes = $xpath->query('//a[contains(@class, "baiscopebutton") or contains(@class, "dlm-buttons") or contains(@id, "download")]');
+        $nodes = $xpath->query('//*[@id="post-237722"]/div/div[3]/a');
+        if ($nodes->length === 0) {
+            $nodes = $xpath->query('//div[starts-with(@id, "post-")]/div/div[3]/a');
+        }
     }
-
-    // Priority 3: Links to common redirect scripts
+    
     if ($nodes->length === 0) {
-        $nodes = $xpath->query('//a[contains(@href, "go.php") or contains(@href, "download.php") or contains(@href, "/Downloads/")]');
+        $nodes = $xpath->query('//a[contains(@class, "dlm-buttons-button-baiscopebutton") or contains(@class, "dlm-buttons-button")]');
     }
-
-    // Fallback: Any .zip/.rar/.srt direct links
+    
     if ($nodes->length === 0) {
-        $nodes = $xpath->query('//a[contains(@href, ".zip") or contains(@href, ".rar") or contains(@href, ".srt")]');
+        $nodes = $xpath->query('//a[contains(@href, "/Downloads/") or contains(@href, ".zip") or contains(@href, ".rar") or contains(@href, ".srt")]');
     }
-
+    
     foreach ($nodes as $node) {
         $href = trim($node->getAttribute('href'));
         if (!$href) continue;
-
+        
+        // Make absolute URL
         if (strpos($href, 'http') !== 0) {
-            $base = dirname($pageUrl) . '/';
+            $base = parse_url($pageUrl, PHP_URL_SCHEME) . '://' . parse_url($pageUrl, PHP_URL_HOST);
             $href = rtrim($base, '/') . '/' . ltrim($href, '/');
         }
-
-        // Try full GET to follow redirects and capture final location
-        $dlResult = fetchPage($href, $pageUrl);
-
-        if ($dlResult['location']) {
-            $final = $dlResult['location'];
-            if (strpos($final, 'http') !== 0 && $dlResult['effectiveUrl']) {
-                $final = rtrim($dlResult['effectiveUrl'], '/') . '/' . ltrim($final, '/');
-            }
-            // Basic check if final looks like a file host or direct file
-            if (preg_match('/(drive\.google\.com|mediafire\.com|mega\.nz|usersdrive\.com|\.zip|\.rar|\.srt)/i', $final)) {
-                return $final;
-            }
-        }
-
-        // If effective URL is a file host or direct
-        if (preg_match('/(drive\.google\.com|mediafire\.com|mega\.nz|usersdrive\.com|\.zip|\.rar|\.srt)/i', $dlResult['effectiveUrl'])) {
-            return $dlResult['effectiveUrl'];
-        }
-
-        // If no direct, return the intermediate link (user can open in browser)
-        if ($dlResult['httpCode'] == 200 || in_array($dlResult['httpCode'], [301, 302, 303])) {
-            return $href;  // Return the button link as fallback
+        
+        // HEAD request
+        $ch = curl_init($href);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+@@ -133,27 +184,35 @@ function getDownloadLink($pageUrl) {
+        curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode == 200 || $httpCode == 302 || $httpCode == 301) {
+            return $href;
         }
     }
-
+    
     return null;
 }
-
 // ================= ROUTER =================
-$path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+$path   = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 $params = $_GET;
 
 switch ($path) {
     case '/':
         echo json_encode($apiInfo, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
         break;
+
     case '/search':
         $query = $params['query'] ?? '';
-        $site = $params['site'] ?? 'all';
+        $site  = $params['site'] ?? 'all';
+
         if (!$query) {
             echo json_encode(['error' => 'query parameter required']);
             exit;
         }
-        $results = [];
+
+        $results  = [];
         $searched = [];
+
         if ($site === 'all') {
             foreach ($sites as $key => $url) {
                 $results[$key] = searchSite($url, $query);
-                $searched[] = $key;
-            }
-        } elseif (isset($sites[$site])) {
-            $results[$site] = searchSite($sites[$site], $query);
-            $searched[] = $site;
-        } else {
+@@ -166,13 +225,15 @@ function getDownloadLink($pageUrl) {
             echo json_encode(['error' => 'invalid site']);
             exit;
         }
+
         echo json_encode([
-            'author' => $apiInfo['author'],
-            'query' => $query,
-            'sites_searched' => $searched,
-            'results' => $results
+            'author'        => $apiInfo['author'],
+            'query'         => $query,
+            'sites_searched'=> $searched,
+            'results'       => $results
         ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
         break;
+
     case '/download':
         $url = $params['url'] ?? '';
         if (!$url) {
-            echo json_encode(['error' => 'url parameter required']);
-            exit;
-        }
-        $dl = getDownloadLink($url);
-        echo json_encode([
-            'author' => 'TheCHARITH (Charith Pramodya Senananayake)',
-            'success' => (bool)$dl,
-            'page_url' => $url,
-            'download_url' => $dl,
-            'note' => $dl ? 'If this is an intermediate link, open it in a browser to complete the timed redirect.' : 'No download link found.'
+@@ -187,6 +248,7 @@ function getDownloadLink($pageUrl) {
+            'download_url' => $dl
         ], JSON_UNESCAPED_UNICODE);
         break;
+
     default:
         echo json_encode(['error' => 'invalid endpoint']);
 }
