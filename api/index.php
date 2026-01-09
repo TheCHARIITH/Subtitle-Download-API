@@ -140,56 +140,53 @@ function searchSite($siteUrl, $query) {
 function getDownloadLink($pageUrl) {
     $html = fetchPage($pageUrl);
     if (!$html) return null;
-    
+
     $dom = new DOMDocument();
     @$dom->loadHTML($html);
     $xpath = new DOMXPath($dom);
-    
-    $nodes = $xpath->query('//a[contains(., "සිංහල උපසිරැසි මෙතනින් බාගන්න") and contains(., "SInhala Subtitles")]');
-    
+
+    $nodes = $xpath->query('//a[contains(., "සිංහල උපසිරැසි මෙතනින් බාගන්න") or contains(., "Download Subtitle") or contains(., "SInhala Subtitles")]');
+
     if ($nodes->length === 0) {
-        $nodes = $xpath->query('//*[@id="post-237722"]/div/div[3]/a');
-        if ($nodes->length === 0) {
-            $nodes = $xpath->query('//div[starts-with(@id, "post-")]/div/div[3]/a');
-        }
+        $nodes = $xpath->query('//a[contains(@class, "dlm-buttons-button") or contains(@class, "baiscopebutton")]');
     }
-    
+
     if ($nodes->length === 0) {
-        $nodes = $xpath->query('//a[contains(@class, "dlm-buttons-button-baiscopebutton") or contains(@class, "dlm-buttons-button")]');
+        $nodes = $xpath->query('//a[contains(@href, ".zip") or contains(@href, ".rar") or contains(@href, ".srt") or contains(@href, "drive.google.com") or contains(@href, "mediafire.com")]');
     }
-    
-    if ($nodes->length === 0) {
-        $nodes = $xpath->query('//a[contains(@href, "/Downloads/") or contains(@href, ".zip") or contains(@href, ".rar") or contains(@href, ".srt")]');
-    }
-    
+
     foreach ($nodes as $node) {
-        $href = trim($node->getAttribute('href'));
-        if (!$href) continue;
-        
-        // Make absolute URL
-        if (strpos($href, 'http') !== 0) {
-            $base = parse_url($pageUrl, PHP_URL_SCHEME) . '://' . parse_url($pageUrl, PHP_URL_HOST);
-            $href = rtrim($base, '/') . '/' . ltrim($href, '/');
+        $intermediateHref = trim($node->getAttribute('href'));
+        if (!$intermediateHref) continue;
+
+        if (strpos($intermediateHref, 'http') !== 0) {
+            $base = dirname($pageUrl) . '/';
+            $intermediateHref = rtrim($base, '/') . '/' . ltrim($intermediateHref, '/');
         }
-        
-        // HEAD request
-        $ch = curl_init($href);
+
+        $ch = curl_init($intermediateHref);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_NOBODY => true,
             CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_TIMEOUT => 10,
-            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            CURLOPT_MAXREDIRS => 10,
+            CURLOPT_TIMEOUT => 30,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+            CURLOPT_HEADER => true, 
+            CURLOPT_NOBODY => false,
         ]);
-        curl_exec($ch);
+        $response = curl_exec($ch);
+        $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);  // redirects URL
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
-        
-        if ($httpCode == 200 || $httpCode == 302 || $httpCode == 301) {
-            return $href;
+
+        if ($httpCode >= 200 && $httpCode < 400 && 
+            (stripos($finalUrl, 'drive.google.com') !== false || 
+             stripos($finalUrl, 'mediafire.com') !== false || 
+             preg_match('/\.(zip|rar|srt)$/i', $finalUrl))) {
+            return $finalUrl;
         }
     }
-    
+
     return null;
 }
 // ================= ROUTER =================
